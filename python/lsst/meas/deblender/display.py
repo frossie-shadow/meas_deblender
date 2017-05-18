@@ -7,6 +7,9 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 
+from lsst.afw.display import rgb
+from . import utils as debUtils
+
 logging.basicConfig()
 logger = logging.getLogger("lsst.meas.deblender.display")
 
@@ -24,10 +27,77 @@ def plotSeds(seds):
                fancybox=True, shadow=True, ncol=seds.shape[1])
     plt.show()
 
+def compareSeds(tables, filters, ax=None, show=True, color_cycle=None):
+    """Compare SEDs from using multiple detection methods
+
+    This allows the user to compare the SEDs of a common set of peaks using multiple detection
+    methods.
+
+    Parameters
+    ----------
+    tables: list of `astropy.table.Table`s and `numpy.ndarray`s
+        Either a peak table, with flux columns ``flux_{i}``, where ``{i}`` is the name of a filter
+        in ``filters``, or an SED matrix, where each column is the SED for a different peak.
+    filters: list of strings
+        Names of the filters in the ``peakTable`` and ``simTable``.
+    ax: `matplotlib.axes`, default = None
+        Optional axes to plot the SEDs.
+    show: bool, default = True
+        Whether or not to show the plots or just update ``ax`` with the new plots
+    color_cycle: list, default = None
+        A list of colors to use for plotting the peaks. If ``color_cycle=None`` then a
+        default color_cycle is used.
+
+    Returns
+    -------
+    allSeds: list of `numpy.ndarray`
+        Seds for each table/matrix in ``tables``.
+    """
+    # If the user didn't specify an axis, create a new figure
+    if ax is None:
+        fig = plt.figure(figsize=(10,8))
+        ax = fig.add_subplot(1,1,1)
+    # Use a default color cycle so that peaks have consistent colors in all tables
+    if color_cycle is None:
+        color_cycle = [u'#4c72b0', u'#55a868', u'#c44e52', u'#8172b2', u'#ccb974', u'#64b5cd']
+    allSeds = []
+    markers = [".-", ".--", ".:", ".-."]
+    midx = 0
+    for n, tbl in enumerate(tables):
+        # If tbl is an array, it is already an SED matrix
+        if hasattr(tbl, "shape"):
+            seds = tbl
+        # otherwise extract the SED matrix from tbl
+        else:
+            seds = np.array([np.array(tbl["flux_{0}".format(f)]).tolist() for f in filters])
+            norm = np.sum(seds, axis=0)
+            seds = seds/norm
+        # Plot the SED for each peak for the current table
+        cidx = 0
+        for pk in range(seds.shape[1]):
+            if n==0:
+                label = "Peak {0}".format(pk)
+            else:
+                label=None
+            ax.plot(seds[:, pk], markers[midx], label=label, color=color_cycle[cidx])
+            cidx += 1
+            if cidx==len(color_cycle):
+                cidx = 0
+        allSeds.append(seds)
+        midx += 1
+        if midx>len(markers):
+            midx = 0
+    # Display the plot
+    if show:
+        plt.title("SEDs")
+        plt.legend(loc="center left", fancybox=True, shadow=True, ncol=1, bbox_to_anchor=(1, 0.5))
+        plt.show()
+    return allSeds
+
 def plotIntensities(seds, intensities, shape, fidx=0,
                     vmin=None, vmax=None, useMask=False):
     """Plot the template image for each source
-    
+
     Multiply each row in ``intensities`` by the SED for filter ``fidx`` and
     plot the result.
     """
@@ -41,10 +111,9 @@ def plotIntensities(seds, intensities, shape, fidx=0,
         plt.imshow(template, interpolation='none', cmap='inferno', vmin=vmin, vmax=vmax)
         plt.show()
 
-def imagesToRgb(images=None, calexps=None, filterIndices=None, xRange=None, yRange=None,
-                contrast=1, adjustZero=True):
+def imagesToRgb(images=None, calexps=None, filterIndices=None, xRange=None, yRange=None, **kwargs):
     """Convert a collection of images or calexp's to an RGB image
-    
+
     This requires either an array of images or a list of calexps.
     If filter indices is not specified, it uses the first three images in opposite order
     (for example if images=[g, r, i], i->R, r->G, g->B).
@@ -72,41 +141,23 @@ def imagesToRgb(images=None, calexps=None, filterIndices=None, xRange=None, yRan
         xSlice = xRange
     # Select the subset of 3 images to use for the RGB image
     images = images[filterIndices,ySlice, xSlice]
+    images = images.astype(np.float32)
+    print(images.shape, images.dtype)
+    try:
+        colors = rgb.AsinhZScaleMapping(images, **kwargs)
+    except:
+        logger.warning("Could not use ZScale, using  AsinhMapping with scaling")
+        colors = rgb.AsinhMapping(np.min(images), np.max(images)-np.min(images))
 
-    # Map intensity to [0,255]
-    intensity = np.arcsinh(contrast*np.sum(images, axis=0)/3)
-    if adjustZero:
-        # Adjust the colors so that zero is the lowest flux value
-        intensity = (intensity-np.min(intensity))/(np.max(intensity)-np.min(intensity))*255
-    else:
-        maxIntensity = np.max(intensity)
-        if maxIntensity > 0:
-            intensity = intensity/(maxIntensity)*255
-            intensity[intensity<0] = 0
-
-    # Use the absolute value to normalize the pixel intensities
-    pixelIntensity = np.sum(np.abs(images), axis=0)
-    # Prevent division by zero
-    zeroPix = pixelIntensity==0
-    pixelIntensity[zeroPix] = 1
-
-    # Calculate the RGB colors
-    pixelIntensity = np.broadcast_to(pixelIntensity, (3, pixelIntensity.shape[0], pixelIntensity.shape[1]))
-    intensity = np.broadcast_to(intensity, (3, intensity.shape[0], intensity.shape[1]))
-    zeroPix = np.broadcast_to(zeroPix, (3, zeroPix.shape[0], zeroPix.shape[1]))
-    colors = images/pixelIntensity*intensity
-    colors[colors<0] = 0
-    colors[zeroPix] = 0
-    colors = colors.astype(np.uint8)
-    return np.dstack(colors)
+    return colors.makeRgbImage(*images)
 
 def plotColorImage(images=None, calexps=None, filterIndices=None, xRange=None, yRange=None,
-                   contrast=100, adjustZero=True, figsize=(5,5)):
+                   Q=8, figsize=(5,5)):
     """Display a collection of images or calexp's as an RGB image
-    
+
     See `imagesToRgb` for more info.
     """
-    colors = imagesToRgb(images, calexps, filterIndices, xRange, yRange, contrast, adjustZero)
+    colors = imagesToRgb(images, calexps, filterIndices, xRange, yRange, Q=Q)
     plt.figure(figsize=figsize)
     plt.imshow(colors)
     plt.show()
@@ -114,7 +165,7 @@ def plotColorImage(images=None, calexps=None, filterIndices=None, xRange=None, y
 
 def maskPlot(img, mask=None, hideAxes=True, show=True, **kwargs):
     """Plot an image with specified pictures masked out
-    
+
     It is often convenient to mask zero (or low flux) pixels in an image to highlight actual structure,
     so this convenience function makes it quick and easy to implement
     ``plt.plot(np.ma.array(img, mask=mask), **kwargs)``, optionally hiding the axes and showing the image.
@@ -122,10 +173,114 @@ def maskPlot(img, mask=None, hideAxes=True, show=True, **kwargs):
     if mask is None:
         mask = img==0
     maImg = np.ma.array(img, mask=mask)
-    
+
     plt.imshow(maImg, **kwargs)
     if hideAxes:
         plt.axis("off")
     if show:
         plt.show()
     return plt
+
+def plotImgWithMarkers(calexps, footprint, filterIndices=None, show=True,
+                       ax=None, img_kwargs=None, footprint_kwargs=None, Q=8, **plot_kwargs):
+    """Plot an RGB image with the footprint and peaks marked
+
+    Use the bounding box of a footprint to extract image data from a set of calexps in a set of colors
+    and plot the image, with the outline of the footprint and the footprint peaks marked
+    """
+    if ax is None:
+        fig = plt.figure(figsize=(8,8))
+        ax = fig.add_subplot(1,1,1)
+    if img_kwargs is None:
+        img_kwargs = {}
+    if footprint_kwargs is None:
+        footprint_kwargs = {}
+    bbox = footprint.getBBox()
+    refBbox = calexps[0].getMaskedImage().getBBox()
+
+    # Display the full color image
+    xSlice, ySlice = debUtils.getRelativeSlices(bbox, refBbox)
+    colors = imagesToRgb(calexps=calexps, filterIndices=filterIndices, xRange=xSlice, yRange=ySlice,
+                         Q=Q)
+    ax.imshow(colors, **img_kwargs)
+
+    # Display the footprint border
+    border, filled = debUtils.getFootprintArray(footprint)
+    if "interpolation" not in footprint_kwargs:
+        footprint_kwargs["interpolation"] = "none"
+    if "cmap" not in footprint_kwargs:
+        footprint_kwargs["cmap"] = "cool"
+    ax.imshow(border, **footprint_kwargs)
+
+    px = [peak.getIx()-bbox.getMinX() for peak in footprint.getPeaks()]
+    py = [peak.getIy()-bbox.getMinY() for peak in footprint.getPeaks()]
+    ax.plot(px, py, "cx", mew=2, **plot_kwargs)
+    ax.set_xlim(0,colors.shape[1]-1)
+    ax.set_ylim(colors.shape[0]-1, 0)
+    if show:
+        plt.show()
+    return ax
+
+def plotFluxDifference(tables, simTable, filters, ax=None, show=True, color_cycle=None):
+    """Plot the difference between measurements and simulated data
+
+    Given a set of peakTables, compare the flux in each band to
+    simultated data.
+
+    Parameters
+    ----------
+    tables: list of `astropy.table.Table`
+        Either a peak table, with flux columns ``flux_{i}``, where ``{i}`` is the name of a filter
+        in ``filters``, or an SED matrix, where each column is the SED for a different peak.
+    simTable: `astropy.table.Table`
+        A table that has been matched with a `peakTable`
+    filters: list of strings
+        Names of the filters in the ``peakTable`` and ``simTable``.
+    ax: `matplotlib.axes`, default = None
+        Optional axes to plot the SEDs.
+    show: bool, default = True
+        Whether or not to show the plots or just update ``ax`` with the new plots
+    color_cycle: list, default = None
+        A list of colors to use for plotting the peaks. If ``color_cycle=None`` then a
+        default color_cycle is used.
+
+    Returns
+    -------
+    None
+    """
+    # If the user didn't specify an axis, create a new figure
+    if ax is None:
+        fig = plt.figure(figsize=(10,8))
+        ax = fig.add_subplot(1,1,1)
+    # Use a default color cycle so that peaks have consistent colors in all tables
+    if color_cycle is None:
+        color_cycle = [u'#4c72b0', u'#55a868', u'#c44e52', u'#8172b2', u'#ccb974', u'#64b5cd']
+    markers = [".-", ".--", ".:", ".-."]
+    midx = 0
+    for n, tbl in enumerate(tables):
+        cidx = 0
+        for pk in range(len(simTable)):
+            if n==0:
+                label = "Peak {0}".format(pk)
+            else:
+                label = None
+            flux_diff = []
+            for f in filters:
+                diff = ((tbl["flux_"+f][pk]-simTable["flux_"+f][pk])/simTable["flux_"+f][pk])
+                flux_diff.append(diff)
+            ax.plot(flux_diff, markers[midx], color=color_cycle[cidx], label=label)
+            cidx += 1
+            if cidx==len(color_cycle):
+                cidx = 0
+
+        midx += 1
+        if midx==len(markers):
+            midx = 0
+
+    if show:
+        ax.set_xlabel("Peak Number")
+        ax.set_ylabel("(Measured-Sim)/Sim Flux")
+        plt.legend(loc="center left", fancybox=True, shadow=True, ncol=1, bbox_to_anchor=(1, 0.5))
+        ax.yaxis.grid(True)
+        ax.xaxis.grid(True)
+        plt.show()
