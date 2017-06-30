@@ -55,7 +55,7 @@ def compareSeds(tables, filters, ax=None, show=True, color_cycle=None):
     """
     # If the user didn't specify an axis, create a new figure
     if ax is None:
-        fig = plt.figure(figsize=(10,8))
+        fig = plt.figure(figsize=(14,8))
         ax = fig.add_subplot(1,1,1)
     # Use a default color cycle so that peaks have consistent colors in all tables
     if color_cycle is None:
@@ -80,6 +80,10 @@ def compareSeds(tables, filters, ax=None, show=True, color_cycle=None):
             else:
                 label=None
             ax.plot(seds[:, pk], markers[midx], label=label, color=color_cycle[cidx])
+            ax.set_xticks(range(len(seds[:, pk])))
+            ax.set_xticklabels(filters)
+            ax.set_xlabel("Filter")
+            ax.set_ylabel("Normalized SED")
             cidx += 1
             if cidx==len(color_cycle):
                 cidx = 0
@@ -126,7 +130,7 @@ def imagesToRgb(images=None, calexps=None, filterIndices=None, xRange=None, yRan
     if len(images)<3:
         raise ValueError("Expected either an array of 3 or more images or a list of 3 or more calexps")
     if filterIndices is None:
-        filterIndices = [2,1,0]
+        filterIndices = [3,2,1]
     if yRange is None:
         ySlice = slice(None, None)
     elif not isinstance(yRange, slice):
@@ -142,7 +146,6 @@ def imagesToRgb(images=None, calexps=None, filterIndices=None, xRange=None, yRan
     # Select the subset of 3 images to use for the RGB image
     images = images[filterIndices,ySlice, xSlice]
     images = images.astype(np.float32)
-    print(images.shape, images.dtype)
     try:
         colors = rgb.AsinhZScaleMapping(images, **kwargs)
     except:
@@ -152,16 +155,27 @@ def imagesToRgb(images=None, calexps=None, filterIndices=None, xRange=None, yRan
     return colors.makeRgbImage(*images)
 
 def plotColorImage(images=None, calexps=None, filterIndices=None, xRange=None, yRange=None,
-                   Q=8, figsize=(5,5)):
+                   Q=8, ax=None, show=True, figsize=(5,5)):
     """Display a collection of images or calexp's as an RGB image
 
     See `imagesToRgb` for more info.
     """
-    colors = imagesToRgb(images, calexps, filterIndices, xRange, yRange, Q=Q)
-    plt.figure(figsize=figsize)
-    plt.imshow(colors)
-    plt.show()
-    return colors
+    if ax is None:
+        fig = plt.figure(figsize=figsize)
+        ax = fig.add_subplot(1,1,1)
+    # afw display struggles if one of the templates has no flux
+    if images is not None:
+        adjustedImages = images.copy()
+        for i, img in enumerate(adjustedImages):
+            if np.sum(img) == 0:
+                adjustedImages[i][0][0] += 1e-9
+    else:
+        adjustedImages = images
+    colors = imagesToRgb(adjustedImages, calexps, filterIndices, xRange, yRange, Q=Q)
+    ax.imshow(colors)
+    if show:
+        plt.show()
+    return ax
 
 def maskPlot(img, mask=None, hideAxes=True, show=True, **kwargs):
     """Plot an image with specified pictures masked out
@@ -284,3 +298,60 @@ def plotFluxDifference(tables, simTable, filters, ax=None, show=True, color_cycl
         ax.yaxis.grid(True)
         ax.xaxis.grid(True)
         plt.show()
+
+def plotPeakTemplates(templates, columns=3, figsize=None, **plotKwargs):
+    """Plot a set of templates for a given peak
+
+    Parameters
+    ----------
+    templates: dict
+        Dictionary of templates for the given peak.
+        The keys of the dictionary will be the title for each image
+        while the values are the templates themselves.
+    columns: int, default=3
+        Number of columns in the figure
+    figsize: tuple, None
+        Size of the figure. If None, this will be calculated automatically,
+        using a width of size 12 and a height proportional to the shape of
+        the images.
+    plotKwargs:
+        Optional keyword arguments passed to
+        `lsst.meas.deblender.display.plotColorImage`.
+
+    Returns
+    -------
+    None
+    """
+    titles = list(templates.keys())
+    shape = templates[titles[0]][0].shape
+    ratio = shape[0]/shape[1]
+    # Calculate the figure grid and create the figure
+    rows = 1+len(templates)//columns
+    if np.mod(len(templates),columns)==0:
+        rows -= 1
+    fig = plt.figure(figsize=(12, rows*10*ratio/1.618))
+    # Plot the image using all of the templates
+    for n, (title, template) in enumerate(templates.items()):
+        ax = fig.add_subplot(rows, columns, n+1)
+        ax.axis("off")
+        plotColorImage(template, ax=ax, show=False, **plotKwargs)
+        ax.set_title(title)
+    plt.show()
+
+def plotAllTemplates(allTemplates, columns=3, figsize=None, **plotKwargs):
+    """Plot a set of templates for all peaks in a blend
+
+    Parameters
+    ----------
+    allTemplates: dict
+        Dictionary of templates.
+        The keys of the dictionary will be the title for each image
+        while the values are 3D templates, with axes (peak, y, x).
+
+    See `plotPeakTemplates` for a description of the other parameters
+    """
+    _, template = list(allTemplates.items())[0]
+    for pk in range(len(template)):
+        logger.info("Peak {0}".format(pk))
+        templates = OrderedDict([(t, template[pk]) for t, template in allTemplates.items()])
+        plotPeakTemplates(templates, columns=columns, figsize=figsize, **plotKwargs)
